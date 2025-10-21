@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Penguin Cake Dodge</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #111; color: #eee; font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, Arial; }
+    #wrap { display: grid; place-items: center; height: 100%; }
+    canvas { background: linear-gradient(#0a3d62, #1e272e); box-shadow: 0 10px 30px rgba(0,0,0,.4); border-radius: 12px; touch-action: none; }
+    .hint { position: fixed; inset: auto 0 10px 0; text-align: center; font-size: 14px; opacity: .8; }
+    .btns { position: fixed; inset: auto 0 70px 0; display: none; gap: 12px; justify-content: center; }
+    .btns button { background:#2a2a2a; color:#eee; border:none; padding:12px 16px; border-radius:10px; font-size:14px; box-shadow:0 4px 10px rgba(0,0,0,.25); }
+    .soundbtn { position: fixed; top: 10px; right: 10px; background:#2a2a2a; color:#eee; border:none; padding:8px 12px; border-radius:10px; font-size:12px; box-shadow:0 4px 10px rgba(0,0,0,.25); opacity:.9; }
+    @media (pointer:none), (pointer:coarse) { .btns { display: flex; } }
+  </style>
+</head>
+<body>
+  <button id="sound" class="soundbtn" aria-pressed="false">🔈 Sound: Off</button>
+  <div id="wrap">
+    <canvas id="game" width="420" height="700"></canvas>
+  </div>
+  <div class="btns">
+    <button data-dir="left">◀︎ Left</button>
+    <button id="restart">Restart</button>
+    <button id="skin">Switch Penguin</button>
+    <button data-dir="right">Right ▶︎</button>
+  </div>
+  <div class="hint">Keyboard: ← → Move | T: Switch Penguin (EJ / Yen) | Space: Restart. Strawberry Cake = +100 | Melted Chocolate = -50 | Milk/Dark Chocolate = Game Over.</div>
+
+  <script>
+  (() => {
+    const cvs = document.getElementById('game');
+    const ctx = cvs.getContext('2d');
+
+    // ===== Audio =====
+    const sounds = {
+      cake: new Audio('https://cdn.pixabay.com/download/audio/2023/03/17/audio_1fba9f1ad2.mp3?filename=game-bonus-144751.mp3'), // cute bonus
+      melted: new Audio('https://cdn.pixabay.com/download/audio/2022/03/15/audio_9d2e17c89e.mp3?filename=cartoon-bubble-pop-146527.mp3'), // pop
+      hit: new Audio('https://cdn.pixabay.com/download/audio/2022/03/15/audio_aa5946ef0b.mp3?filename=negative_beeps-6008.mp3'), // lose
+      swap: new Audio('https://cdn.pixabay.com/download/audio/2022/03/15/audio_bef05450c1.mp3?filename=click-124467.mp3'), // click
+      bgm: new Audio('https://cdn.pixabay.com/download/audio/2022/03/21/audio_1f9b5e1f36.mp3?filename=folk-dance-irish-music-140467.mp3') // Irish background
+    };
+    Object.values(sounds).forEach(a=>{ a.volume = 0.6; a.preload = 'auto'; a.loop = false; a.muted = true; });
+    sounds.bgm.loop = true; sounds.bgm.volume = 0.4;
+
+    const audio = { enabled:false, unlocked:false };
+    function updateSoundBadge(){
+      const btn = document.getElementById('sound');
+      btn.textContent = (audio.enabled? '🔊 Sound: On' : '🔈 Sound: Off');
+      btn.setAttribute('aria-pressed', String(audio.enabled));
+      Object.values(sounds).forEach(a=>{ a.muted = !audio.enabled; });
+      if(audio.enabled){ try{ sounds.bgm.play(); }catch{} } else { try{ sounds.bgm.pause(); }catch{} }
+    }
+    function toggleSound(){ audio.enabled = !audio.enabled; updateSoundBadge(); }
+    function unlockAudio(){
+      if (audio.unlocked) return;
+      audio.unlocked = true;
+      Object.values(sounds).forEach(a=>{
+        try { a.muted = false; a.play().then(()=>{ a.pause(); a.currentTime = 0; }).catch(()=>{}); } catch {}
+      });
+      updateSoundBadge();
+    }
+
+    document.addEventListener('pointerdown', unlockAudio, { once:true });
+    document.addEventListener('keydown', unlockAudio, { once:true });
+
+    document.getElementById('sound').addEventListener('click', () => {
+      unlockAudio();
+      toggleSound();
+    });
+
+    // ===== Game State =====
+    const state = {
+      running: true,
+      gameOver: false,
+      score: 0,
+      hi: Number(localStorage.getItem('cake_hi')||0),
+      spawnTimer: 0,
+      spawnInterval: 0.8,
+      time: 0,
+    };
+
+    function fitCanvas() {
+      const vh = Math.min(window.innerHeight * 0.96, 820);
+      const vw = Math.min(window.innerWidth * 0.96, 520);
+      const targetH = Math.min(vh, vw * (5/3));
+      const targetW = targetH * (3/5);
+      cvs.style.width = targetW + 'px';
+      cvs.style.height = targetH + 'px';
+    }
+    window.addEventListener('resize', fitCanvas);
+    fitCanvas();
+
+    const player = { x: cvs.width/2 - 26, y: cvs.height - 80, w: 52, h: 60, speed: 320, skin: 0 };
+    const blocks = [];
+
+    // ===== Input =====
+    const keys = { left:false, right:false };
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+      if (e.code === 'Space') { if (state.gameOver) restart(); }
+      if (e.code === 'KeyT') { toggleSkin(); if(audio.enabled){ try{sounds.swap.currentTime=0; sounds.swap.play();}catch{} } }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+    });
+
+    document.querySelectorAll('[data-dir]').forEach(btn => {
+      const dir = btn.dataset.dir;
+      const set = (val) => { keys[dir === 'left' ? 'left' : 'right'] = val; };
+      btn.addEventListener('pointerdown', e => { e.preventDefault(); set(true); });
+      btn.addEventListener('pointerup', () => set(false));
+      btn.addEventListener('pointercancel', () => set(false));
+      btn.addEventListener('pointerleave', () => set(false));
+    });
+    document.getElementById('restart').addEventListener('click', restart);
+    document.getElementById('skin').addEventListener('click', ()=>{ toggleSkin(); if(audio.enabled){ try{sounds.swap.currentTime=0; sounds.swap.play();}catch{} } });
+
+    function restart() {
+      blocks.length = 0;
+      state.running = true;
+      state.gameOver = false;
+      state.score = 0;
+      state.time = 0;
+      state.spawnTimer = 0;
+      state.spawnInterval = 0.8;
+      player.x = cvs.width/2 - player.w/2;
+      if (audio.enabled) { try { sounds.bgm.currentTime = 0; sounds.bgm.play(); } catch {} }
+    }
+
+    // ===== Utils =====
+    const rand = (min, max) => Math.random() * (max - min) + min;
+    function aabb(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+    // ===== Spawning =====
+    function spawnBlock() {
+      const w = rand(22, 64);
+      const h = rand(16, 34);
+      const x = rand(6, cvs.width - w - 6);
+      const y = -h;
+      const speed = rand(120, 200) + state.time * 6;
+      const r = Math.random();
+      const type = r < 0.4 ? 'milk' : r < 0.8 ? 'dark' : r < 0.9 ? 'cake' : 'melted';
+      blocks.push({ x, y, w, h, vy: speed, type });
+    }
+
+    // ===== Loop =====
+    let last = performance.now();
+    function loop(t) {
+      const dt = Math.min(0.033, (t - last)/1000);
+      last = t;
+      if (state.running) update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    function update(dt) {
+      state.time += dt;
+      state.score += dt * 10;
+      state.spawnTimer += dt;
+      state.spawnInterval = Math.max(0.25, 0.8 - state.time * 0.02);
+      if (state.spawnTimer >= state.spawnInterval) {
+        state.spawnTimer = 0;
+        spawnBlock();
+      }
+      const dir = (keys.left ? -1 : 0) + (keys.right ? 1 : 0);
+      player.x += dir * player.speed * dt;
+      player.x = Math.max(4, Math.min(cvs.width - player.w - 4, player.x));
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        b.y += b.vy * dt;
+        if (b.y > cvs.height + 80) { blocks.splice(i, 1); continue; }
+        if (aabb(player, b)) { onHit(b, i); }
+      }
+    }
+
+    function onHit(b, index){
+      if (b.type === 'cake') {
+        state.score += 100;
+        if(audio.enabled){ try{sounds.cake.currentTime=0; sounds.cake.play();}catch{} }
+        blocks.splice(index, 1);
+        return;
+      }
+      if (b.type === 'melted') {
+        state.score = Math.max(0, state.score - 50);
+        if(audio.enabled){ try{sounds.melted.currentTime=0; sounds.melted.play();}catch{} }
+        blocks.splice(index, 1);
+        return;
+      }
+      if(audio.enabled){ try{sounds.hit.currentTime=0; sounds.hit.play();}catch{} }
+      gameOver();
+    }
+
+    function gameOver() {
+      state.running = false;
+      state.gameOver = true;
+      state.hi = Math.max(state.hi, Math.floor(state.score));
+      localStorage.setItem('cake_hi', String(state.hi));
+      try { sounds.bgm.pause(); } catch {}
+    }
+
+    // ===== Draw =====
+    function draw() {
+      ctx.fillStyle = '#0a3d62';
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+      drawAvatarBar();
+      drawPenguin(ctx, player.x, player.y, player.w, player.h, player.skin);
+      blocks.forEach(b => drawTreat(ctx, b));
+      ctx.fillStyle = '#eee';
+      ctx.font = '20px ui-sans-serif, system-ui';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`Score: ${Math.floor(state.score)}`, 12, 10);
+      ctx.fillText(`Best: ${state.hi}`, cvs.width - 120, 10);
+      if (state.gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,.55)';
+        ctx.fillRect(0,0,cvs.width,cvs.height);
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 28px ui-sans-serif, system-ui';
+        ctx.fillText('GAME OVER', cvs.width/2, cvs.height/2 - 30);
+        ctx.font = '18px ui-sans-serif, system-ui';
+        ctx.fillText('Press Space or click Restart', cvs.width/2, cvs.height/2 + 6);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    function drawAvatarBar(){
+      const pad = 8, size = 34;
+      ctx.fillStyle = 'rgba(0,0,0,.35)';
+      roundRect(ctx, 8, 8, size*2 + pad*3 + 50, size + pad*2, 10, true);
+      drawPenguin(ctx, 8+pad, 8+pad, size, size+4, 0);
+      ctx.fillStyle = '#ddd'; ctx.font = '12px ui-sans-serif, system-ui';
+      ctx.fillText('EJ', 8+pad, 8+pad+size+6);
+      drawPenguin(ctx, 8+pad*2+size, 8+pad, size, size+4, 1);
+      ctx.fillText('Yen', 8+pad*2+size, 8+pad+size+6);
+      ctx.strokeStyle = '#7dd3fc'; ctx.lineWidth = 2;
+      const boxX = player.skin===0 ? (8+pad-4) : (8+pad*2+size-4);
+      ctx.strokeRect(boxX, 8+pad-4, size+8, size+8);
+    }
+
+    function roundRect(ctx, x, y, w, h, r, fill) {
+      const rr = Math.min(r, w/2, h/2);
+      ctx.beginPath();
+      ctx.moveTo(x+rr, y);
+      ctx.arcTo(x+w, y, x+w, y+h, rr);
+      ctx.arcTo(x+w, y+h, x, y+h, rr);
+      ctx.arcTo(x, y+h, x, y, rr);
+      ctx.arcTo(x, y, x+w, y, rr);
+      ctx.closePath();
+      if (fill) ctx.fill();
+    }
+
+    function drawPenguin(ctx, x, y, w, h, skin=0) {
+      const cx = x + w/2, cy = y + h/2;
+      ctx.save();
+      ctx.translate(cx, cy+2);
+      const bw = w*0.9, bh = h*0.95, r = Math.min(bw,bh)*0.35;
+      ctx.fillStyle = '#6b6f78';
+      roundRect(ctx, -bw/2, -bh/2, bw, bh, r, true);
+      ctx.fillStyle = '#f3f5f6';
+      roundRect(ctx, -bw*0.38, -bh*0.2, bw*0.76, bh*0.65, r*0.6, true);
+      ctx.fillStyle = '#111';
+      ctx.beginPath(); ctx.arc(-bw*0.18, -bh*0.06, bw*0.06, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc( bw*0.18, -bh*0.06, bw*0.06, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#f2b632';
+      roundRect(ctx, -bw*0.12, 0, bw*0.24, bh*0.10, bw*0.06, true);
+      ctx.globalAlpha = 0.25; ctx.fillStyle = '#ff7f7f';
+      ctx.beginPath(); ctx.arc(-bw*0.28, -bh*0.01, bw*0.07, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc( bw*0.28, -bh*0.01, bw*0.07, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+      if (skin===0){
+        ctx.fillStyle = '#d39a1a';
+        roundRect(ctx, -bw*0.50, bh*0.05, bw*1.00, bh*0.35, bw*0.12, true);
+        ctx.fillStyle = '#c88f12';
+        roundRect(ctx, -bw*0.22, bh*0.19, bw*0.44, bh*0.12, bw*0.06, true);
+      } else {
+        ctx.fillStyle = '#2e5b78';
+        roundRect(ctx, -bw*0.50, bh*0.03, bw*1.00, bh*0.38, bw*0.10, true);
+        ctx.fillStyle = '#cfd9df';
+        roundRect(ctx, -bw*0.35, bh*0.12, bw*0.70, bh*0.24, bw*0.06, true);
+        ctx.fillStyle = '#ead9a5';
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc(0, bh*0.10 + i*bh*0.08, bw*0.03, 0, Math.PI*2); ctx.fill(); }
+      }
+      ctx.restore();
+    }
+
+    // Treat drawing (milk/dark/melted/cake)
+    function drawTreat(ctx, b){
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      let grad;
+      if (b.type === 'milk') {
+        grad = ctx.createLinearGradient(0,0,0,b.h);
+        grad.addColorStop(0, '#8b5a3c');
+        grad.addColorStop(1, '#5d3a22');
+      } else if (b.type === 'dark') {
+        grad = ctx.createLinearGradient(0,0,0,b.h);
+        grad.addColorStop(0, '#3f2518');
+        grad.addColorStop(1, '#1f130c');
+      } else if (b.type === 'cake') {
+        // Strawberry cake: pink with white cream and a tiny strawberry
+        grad = ctx.createLinearGradient(0,0,0,b.h);
+        grad.addColorStop(0, '#ff9ec8');
+        grad.addColorStop(1, '#ff6fa8');
+        ctx.fillStyle = grad;
+        roundRect(ctx, 0, 0, b.w, b.h, Math.min(10, b.w*0.2), true);
+        // cream layer
+        ctx.fillStyle = '#fff';
+        roundRect(ctx, b.w*0.1, b.h*0.25, b.w*0.8, b.h*0.18, 6, true);
+        // strawberry on top
+        ctx.fillStyle = '#e02d2d';
+        ctx.beginPath(); ctx.ellipse(b.w*0.8, b.h*0.2, Math.max(3,b.w*0.08), Math.max(3,b.h*0.12), 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#2ecc71';
+        ctx.beginPath(); ctx.moveTo(b.w*0.8, b.h*0.1); ctx.lineTo(b.w*0.76, b.h*0.16); ctx.lineTo(b.w*0.84, b.h*0.16); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        return;
+      } else { // melted
+        grad = ctx.createLinearGradient(0,0,0,b.h);
+        grad.addColorStop(0, '#7a3e2a');
+        grad.addColorStop(1, '#33180f');
+      }
+      ctx.fillStyle = grad;
+      const radius = Math.min(10, b.w*0.2);
+      roundRect(ctx, 0, 0, b.w, b.h, radius, true);
+      if (b.type === 'melted') {
+        // drip effect
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath();
+        ctx.moveTo(b.w*0.2, b.h);
+        ctx.quadraticCurveTo(b.w*0.3, b.h*1.25, b.w*0.4, b.h);
+        ctx.moveTo(b.w*0.65, b.h);
+        ctx.quadraticCurveTo(b.w*0.75, b.h*1.2, b.w*0.85, b.h);
+        ctx.fill();
+      } else {
+        // highlight
+        ctx.globalAlpha = 0.35; ctx.fillStyle = '#ffffff';
+        roundRect(ctx, b.w*0.06, b.h*0.10, b.w*0.25, b.h*0.20, 6, true);
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+    }
+
+    function toggleSkin(){ player.skin = (player.skin + 1) % 2; }
+
+    // ===== Tiny Console Tests =====
+    function selfTest(){
+      const results = [];
+      try {
+        results.push(['draw exists', typeof draw==='function']);
+        const n0 = blocks.length; spawnBlock(); const n1 = blocks.length; results.push(['spawn adds', n1===n0+1]);
+        results.push(['aabb true', aabb({x:0,y:0,w:10,h:10},{x:5,y:5,w:5,h:5})===true]);
+        results.push(['aabb false', aabb({x:0,y:0,w:10,h:10},{x:20,y:20,w:5,h:5})===false]);
+      } catch(e){ console.error(e); }
+      console.table(results.map(([name, ok])=>({test:name, pass:!!ok})));
+    }
+
+    requestAnimationFrame(loop);
+    selfTest();
+    updateSoundBadge();
+  })();
+  </script>
+</body>
+</html>
